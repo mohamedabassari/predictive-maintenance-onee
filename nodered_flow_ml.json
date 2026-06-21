@@ -1,0 +1,302 @@
+[
+    {
+        "id": "tab_ml",
+        "type": "tab",
+        "label": "Predictions ML",
+        "disabled": false,
+        "info": "Reception et affichage des predictions du modele Python ML"
+    },
+
+    {
+        "id": "group_ml_status",
+        "type": "ui_group",
+        "name": "Statut ML",
+        "tab": "tab_ui_main",
+        "order": 5,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "group_ml_predictions",
+        "type": "ui_group",
+        "name": "Predictions IA",
+        "tab": "tab_ui_main",
+        "order": 6,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+
+    {
+        "id": "comment_ml_input",
+        "type": "comment",
+        "z": "tab_ml",
+        "name": "=== RECEPTION PREDICTIONS ML ===",
+        "info": "Ecoute les resultats publies par predict_realtime.py",
+        "x": 160,
+        "y": 40,
+        "wires": []
+    },
+
+    {
+        "id": "mqtt_ml_predictions",
+        "type": "mqtt in",
+        "z": "tab_ml",
+        "name": "MQTT Predictions ML",
+        "topic": "station/pompe/+/ml/prediction",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "mqtt_broker_config",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 120,
+        "wires": [
+            ["parse_ml_prediction"]
+        ]
+    },
+
+    {
+        "id": "mqtt_ml_status",
+        "type": "mqtt in",
+        "z": "tab_ml",
+        "name": "MQTT Statut ML",
+        "topic": "station/status/ml",
+        "qos": "0",
+        "datatype": "utf8",
+        "broker": "mqtt_broker_config",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 260,
+        "wires": [
+            ["display_ml_status"]
+        ]
+    },
+
+    {
+        "id": "parse_ml_prediction",
+        "type": "function",
+        "z": "tab_ml",
+        "name": "Traiter Prediction ML",
+        "func": "var data = msg.payload;\nvar pompeId = data.pompe_id;\n\n// Stocker dans le contexte flow\nvar predictions = flow.get('ml_predictions') || {};\npredictions[pompeId] = data;\nflow.set('ml_predictions', predictions);\n\n// === SORTIE 1 : Gauge anomalie ===\nvar scoreAnomalie = 0;\nvar estAnomalie = false;\nif (data.isolation_forest) {\n    scoreAnomalie = data.isolation_forest.score_anomalie * 100;\n    estAnomalie = data.isolation_forest.est_anomalie;\n}\n\nvar msg1 = {\n    payload: Math.round(scoreAnomalie),\n    topic: 'Pompe ' + pompeId\n};\n\n// === SORTIE 2 : RUL predit par LSTM ===\nvar rulText = 'Stable';\nvar rul = -1;\nif (data.lstm) {\n    rul = data.lstm.rul_minutes;\n    if (rul === 0) rulText = 'CRITIQUE!';\n    else if (rul > 0 && rul < 60) rulText = rul + ' min';\n    else if (rul >= 60) rulText = Math.floor(rul/60) + 'h' + (rul%60) + 'min';\n    else rulText = 'Stable';\n}\n\nvar msg2 = {\n    payload: 'P' + pompeId + ' (ML): ' + rulText,\n    topic: 'Pompe ' + pompeId\n};\n\n// === SORTIE 3 : Alerte ML ===\nvar msg3 = null;\nif (data.niveau_ml === 'ALERTE' || data.niveau_ml === 'CRITIQUE') {\n    var alerteMsg = 'ML POMPE ' + pompeId + ' - ' + data.niveau_ml;\n    alerteMsg += ' | Score anomalie: ' + (scoreAnomalie).toFixed(0) + '%';\n    if (data.lstm) {\n        alerteMsg += ' | Delta T predit: ' + data.lstm.delta_t_predit + ' C';\n        alerteMsg += ' | RUL: ' + rulText;\n    }\n    msg3 = {\n        payload: alerteMsg,\n        topic: 'Alerte ML'\n    };\n}\n\n// === SORTIE 4 : InfluxDB ===\nvar msg4 = {\n    measurement: 'ml_predictions',\n    payload: {\n        score_anomalie: scoreAnomalie / 100,\n        est_anomalie: estAnomalie ? 1 : 0,\n        delta_t_predit: data.lstm ? data.lstm.delta_t_predit : null,\n        health_predit: data.lstm ? data.lstm.health_predit : null,\n        rul_predit: (data.lstm && data.lstm.rul_minutes >= 0) ? data.lstm.rul_minutes : null,\n        tendance: data.lstm ? data.lstm.tendance : 0,\n        confiance: data.confiance || 0\n    },\n    tags: {\n        pompe_id: 'pompe_' + pompeId,\n        niveau_ml: data.niveau_ml || 'NORMAL'\n    }\n};\n\n// === SORTIE 5 : Texte resume pour dashboard ===\nvar resume = 'P' + pompeId + ': ';\nresume += data.niveau_ml || 'NORMAL';\nif (data.lstm) {\n    resume += ' | Predit: ' + data.lstm.delta_t_predit + ' C';\n    resume += ' | Health: ' + data.lstm.health_predit + '/100';\n}\n\nvar msg5 = {\n    payload: resume,\n    topic: 'Pompe ' + pompeId\n};\n\nreturn [msg1, msg2, msg3, msg4, msg5];",
+        "outputs": 5,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 440,
+        "y": 120,
+        "wires": [
+            ["gauge_anomalie"],
+            ["text_rul_ml"],
+            ["alert_ml_toast", "alert_ml_log"],
+            ["influx_ml"],
+            ["text_resume_ml"]
+        ]
+    },
+
+    {
+        "id": "gauge_anomalie",
+        "type": "ui_gauge",
+        "z": "tab_ml",
+        "name": "Gauge Score Anomalie",
+        "group": "group_ml_predictions",
+        "order": 1,
+        "width": "4",
+        "height": "4",
+        "gtype": "gage",
+        "title": "Anomalie {{topic}}",
+        "label": "%",
+        "format": "{{value}}",
+        "min": 0,
+        "max": 100,
+        "colors": [
+            "#2ca02c",
+            "#ff7f0e",
+            "#d62728"
+        ],
+        "seg1": "40",
+        "seg2": "70",
+        "className": "",
+        "x": 740,
+        "y": 60,
+        "wires": []
+    },
+
+    {
+        "id": "text_rul_ml",
+        "type": "ui_text",
+        "z": "tab_ml",
+        "group": "group_ml_predictions",
+        "order": 2,
+        "width": "6",
+        "height": "1",
+        "name": "RUL ML",
+        "label": "RUL (IA)",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 720,
+        "y": 120,
+        "wires": []
+    },
+
+    {
+        "id": "text_resume_ml",
+        "type": "ui_text",
+        "z": "tab_ml",
+        "group": "group_ml_predictions",
+        "order": 3,
+        "width": "12",
+        "height": "1",
+        "name": "Resume ML",
+        "label": "Prediction IA",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 730,
+        "y": 300,
+        "wires": []
+    },
+
+    {
+        "id": "alert_ml_toast",
+        "type": "ui_toast",
+        "z": "tab_ml",
+        "position": "top right",
+        "displayTime": "15",
+        "highlight": "",
+        "sendall": true,
+        "outputs": 0,
+        "ok": "OK",
+        "cancel": "",
+        "raw": false,
+        "className": "",
+        "topic": "Alerte IA",
+        "name": "Notification ML",
+        "x": 740,
+        "y": 180,
+        "wires": []
+    },
+
+    {
+        "id": "alert_ml_log",
+        "type": "ui_text",
+        "z": "tab_ml",
+        "group": "group_ml_predictions",
+        "order": 4,
+        "width": "12",
+        "height": "2",
+        "name": "Journal Alertes ML",
+        "label": "Derniere alerte IA",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 750,
+        "y": 240,
+        "wires": []
+    },
+
+    {
+        "id": "influx_ml",
+        "type": "influxdb out",
+        "z": "tab_ml",
+        "influxdb": "influxdb_config",
+        "name": "InfluxDB Predictions ML",
+        "measurement": "ml_predictions",
+        "precision": "s",
+        "retentionPolicy": "",
+        "database": "",
+        "precisionV18FluxV20": "s",
+        "retentionPolicyV18Flux": "",
+        "org": "station_traitement",
+        "bucket": "pt100_data",
+        "x": 760,
+        "y": 360,
+        "wires": []
+    },
+
+    {
+        "id": "display_ml_status",
+        "type": "ui_text",
+        "z": "tab_ml",
+        "group": "group_ml_status",
+        "order": 1,
+        "width": "4",
+        "height": "1",
+        "name": "Statut ML",
+        "label": "Modele IA",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "x": 420,
+        "y": 260,
+        "wires": []
+    },
+
+    {
+        "id": "comment_ml_api",
+        "type": "comment",
+        "z": "tab_ml",
+        "name": "=== API PREDICTIONS ML ===",
+        "info": "Endpoint pour le dashboard web",
+        "x": 160,
+        "y": 360,
+        "wires": []
+    },
+
+    {
+        "id": "api_get_ml",
+        "type": "http in",
+        "z": "tab_ml",
+        "name": "GET /api/ml/predictions",
+        "url": "/api/ml/predictions",
+        "method": "get",
+        "upload": false,
+        "skipBodyParsing": false,
+        "swaggerDoc": "",
+        "x": 170,
+        "y": 420,
+        "wires": [
+            ["format_api_ml"]
+        ]
+    },
+
+    {
+        "id": "format_api_ml",
+        "type": "function",
+        "z": "tab_ml",
+        "name": "Formater reponse ML",
+        "func": "var predictions = flow.get('ml_predictions') || {};\n\nvar resultat = {};\nfor (var id in predictions) {\n    var p = predictions[id];\n    resultat['pompe_' + id] = {\n        niveau_ml: p.niveau_ml || 'NORMAL',\n        score_anomalie: p.isolation_forest ? p.isolation_forest.score_anomalie : 0,\n        est_anomalie: p.isolation_forest ? p.isolation_forest.est_anomalie : false,\n        delta_t_predit: p.lstm ? p.lstm.delta_t_predit : null,\n        health_predit: p.lstm ? p.lstm.health_predit : null,\n        rul_predit: p.lstm ? p.lstm.rul_minutes : null,\n        tendance: p.lstm ? p.lstm.tendance : 0,\n        confiance: p.confiance || 0,\n        timestamp: p.timestamp || null\n    };\n}\n\nmsg.payload = {\n    status: 'ok',\n    ml_active: Object.keys(predictions).length > 0,\n    nb_pompes: Object.keys(resultat).length,\n    predictions: resultat\n};\n\nmsg.statusCode = 200;\nmsg.headers = {\n    'Content-Type': 'application/json',\n    'Access-Control-Allow-Origin': '*'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 440,
+        "y": 420,
+        "wires": [
+            ["api_response_ml"]
+        ]
+    },
+
+    {
+        "id": "api_response_ml",
+        "type": "http response",
+        "z": "tab_ml",
+        "name": "Reponse ML",
+        "statusCode": "",
+        "headers": {},
+        "x": 660,
+        "y": 420,
+        "wires": []
+    }
+]

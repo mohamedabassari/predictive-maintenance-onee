@@ -1,0 +1,22 @@
+# Fichiers rapport/soutenance (prives)
+rapport_PFE.tex
+explication_systeme.tex
+questions_soutenance.tex
+Diagramme_Gantt_PFE.xlsx
+
+# Modeles entraines (trop lourds pour GitHub)
+ml/models/*.pkl
+ml/models/*.h5
+
+# Donnees generees
+*.csv
+training_data.xlsx
+
+# Systeme
+.DS_Store
+Thumbs.db
+*.pyc
+__pycache__/
+.claude/
+settings.local.json
+kicad_projet/

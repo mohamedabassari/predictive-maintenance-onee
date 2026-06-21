@@ -1,0 +1,342 @@
+[
+    {
+        "id": "tab_principal",
+        "type": "tab",
+        "label": "Capteurs + API",
+        "disabled": false,
+        "info": "Reception capteurs PT100/DHT11, calculs, stockage InfluxDB, API REST pour dashboard"
+    },
+
+    {
+        "id": "mqtt_broker_config",
+        "type": "mqtt-broker",
+        "name": "Mosquitto Local",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "nodered_principal",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "station/status/nodered",
+        "birthQos": "1",
+        "birthRetain": "true",
+        "birthPayload": "online",
+        "birthMsg": {},
+        "closeTopic": "station/status/nodered",
+        "closeQos": "1",
+        "closeRetain": "true",
+        "closePayload": "offline",
+        "closeMsg": {},
+        "willTopic": "station/status/nodered",
+        "willQos": "1",
+        "willRetain": "true",
+        "willPayload": "offline",
+        "willMsg": {},
+        "sessionExpiry": ""
+    },
+
+    {
+        "id": "comment_capteurs",
+        "type": "comment",
+        "z": "tab_principal",
+        "name": "=== RECEPTION CAPTEURS ===",
+        "x": 150,
+        "y": 40,
+        "wires": []
+    },
+
+    {
+        "id": "mqtt_pt100",
+        "type": "mqtt in",
+        "z": "tab_principal",
+        "name": "MQTT PT100 (toutes pompes)",
+        "topic": "station/pompe/+/pt100/avant/temperature",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "mqtt_broker_config",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 180,
+        "y": 120,
+        "wires": [
+            ["extraire_pompe_id"]
+        ]
+    },
+
+    {
+        "id": "mqtt_dht11",
+        "type": "mqtt in",
+        "z": "tab_principal",
+        "name": "MQTT DHT11 (ambiance)",
+        "topic": "station/ambiance/dht11",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "mqtt_broker_config",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 170,
+        "y": 200,
+        "wires": [
+            ["stocker_ambiance"]
+        ]
+    },
+
+    {
+        "id": "stocker_ambiance",
+        "type": "function",
+        "z": "tab_principal",
+        "name": "Stocker T_ambiante",
+        "func": "// Stocker la temperature ambiante dans le contexte flow\nvar data = msg.payload;\nflow.set('T_ambiante', data.temperature || 25);\nflow.set('humidite', data.humidite || 50);\nreturn msg;",
+        "outputs": 1,
+        "x": 420,
+        "y": 200,
+        "wires": [["debug_ambiance"]]
+    },
+
+    {
+        "id": "debug_ambiance",
+        "type": "debug",
+        "z": "tab_principal",
+        "name": "Debug Ambiance",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "x": 640,
+        "y": 200,
+        "wires": []
+    },
+
+    {
+        "id": "extraire_pompe_id",
+        "type": "function",
+        "z": "tab_principal",
+        "name": "Extraire pompe_id + Calculs",
+        "func": "// Extraire le numero de pompe du topic\n// Topic format: station/pompe/X/pt100/avant/temperature\nvar parts = msg.topic.split('/');\nvar pompeNum = parseInt(parts[2]);\nvar pompeId = 'pompe_' + pompeNum;\n\nvar T_moteur = msg.payload.temperature;\nvar T_ambiante = flow.get('T_ambiante') || 25;\nvar humidite = flow.get('humidite') || 50;\n\n// --- Calcul Delta T ---\nvar delta_T = Math.max(0, T_moteur - T_ambiante);\n\n// --- Calcul Pente (variation par minute) ---\nvar historique = flow.get('historique_' + pompeId) || [];\nhistorique.push({ delta_T: delta_T, timestamp: Date.now() });\n\n// Garder 60 derniers points (2 minutes a 2s d'intervalle)\nif (historique.length > 60) historique.shift();\nflow.set('historique_' + pompeId, historique);\n\nvar pente = 0;\nif (historique.length >= 2) {\n    var ancien = historique[0];\n    var recent = historique[historique.length - 1];\n    var dureeMin = (recent.timestamp - ancien.timestamp) / 60000;\n    if (dureeMin > 0) {\n        pente = (recent.delta_T - ancien.delta_T) / dureeMin;\n    }\n}\n\n// --- Calcul Health Score (par paliers) ---\nvar health_score = 100;\nif (delta_T <= 15) {\n    health_score = 100;\n} else if (delta_T <= 30) {\n    health_score = 100 - ((delta_T - 15) / 15) * 20;\n} else if (delta_T <= 45) {\n    health_score = 80 - ((delta_T - 30) / 15) * 30;\n} else if (delta_T <= 60) {\n    health_score = 50 - ((delta_T - 45) / 15) * 30;\n} else {\n    health_score = Math.max(0, 20 - ((delta_T - 60) / 20) * 20);\n}\n\n// Penalite pente\nif (pente > 0.5) {\n    health_score -= (pente - 0.5) * 10;\n}\nhealth_score = Math.max(0, Math.min(100, Math.round(health_score)));\n\n// --- Calcul RUL ---\nvar seuil_critique = 70;\nvar rul_minutes = -1;\nif (pente > 0.1) {\n    rul_minutes = Math.round((seuil_critique - delta_T) / pente);\n    if (rul_minutes < 0) rul_minutes = 0;\n}\n\n// --- Stocker dans le contexte flow pour l'API ---\nvar pompesData = flow.get('pompes_data') || {};\npompesData[pompeId] = {\n    pompe_id: pompeId,\n    T_moteur: Math.round(T_moteur * 100) / 100,\n    T_ambiante: Math.round(T_ambiante * 100) / 100,\n    delta_T: Math.round(delta_T * 100) / 100,\n    health_score: health_score,\n    pente: Math.round(pente * 1000) / 1000,\n    rul_minutes: rul_minutes,\n    humidite: humidite,\n    timestamp: new Date().toISOString()\n};\nflow.set('pompes_data', pompesData);\n\n// Sortie pour InfluxDB\nmsg.payload = {\n    T_moteur: T_moteur,\n    T_ambiante: T_ambiante,\n    delta_T: delta_T,\n    health_score: health_score,\n    pente: pente,\n    rul_minutes: rul_minutes\n};\nmsg.measurement = 'pt100_data';\nmsg.tags = { pompe_id: pompeId };\nmsg.pompe_id = pompeId;\n\nreturn msg;",
+        "outputs": 1,
+        "x": 460,
+        "y": 120,
+        "wires": [
+            ["influx_pt100", "debug_calculs"]
+        ]
+    },
+
+    {
+        "id": "debug_calculs",
+        "type": "debug",
+        "z": "tab_principal",
+        "name": "Debug Calculs",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "true",
+        "x": 710,
+        "y": 160,
+        "wires": []
+    },
+
+    {
+        "id": "influx_pt100",
+        "type": "influxdb out",
+        "z": "tab_principal",
+        "influxdb": "influx_config",
+        "name": "InfluxDB pt100_data",
+        "measurement": "",
+        "precision": "s",
+        "retentionPolicy": "",
+        "database": "",
+        "precisionV18FluxV20": "s",
+        "retentionPolicyV18Flux": "",
+        "org": "onee",
+        "bucket": "pt100_data",
+        "x": 730,
+        "y": 120,
+        "wires": []
+    },
+
+    {
+        "id": "influx_config",
+        "type": "influxdb",
+        "hostname": "localhost",
+        "port": "8086",
+        "protocol": "http",
+        "database": "",
+        "name": "InfluxDB Local",
+        "usetls": false,
+        "tls": "",
+        "influxdbVersion": "2.0",
+        "url": "http://localhost:8086",
+        "rejectUnauthorized": false
+    },
+
+    {
+        "id": "comment_api",
+        "type": "comment",
+        "z": "tab_principal",
+        "name": "=== API REST POUR DASHBOARD ===",
+        "x": 170,
+        "y": 320,
+        "wires": []
+    },
+
+    {
+        "id": "http_api_pt100",
+        "type": "http in",
+        "z": "tab_principal",
+        "name": "GET /api/pt100",
+        "url": "/api/pt100",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 150,
+        "y": 380,
+        "wires": [
+            ["construire_reponse_pt100"]
+        ]
+    },
+
+    {
+        "id": "construire_reponse_pt100",
+        "type": "function",
+        "z": "tab_principal",
+        "name": "Construire reponse JSON",
+        "func": "var pompesData = flow.get('pompes_data') || {};\nvar T_ambiante = flow.get('T_ambiante') || 25;\nvar humidite = flow.get('humidite') || 50;\n\n// Verifier s'il y a des donnees\nvar hasDonnees = Object.keys(pompesData).length > 0;\n\nif (!hasDonnees) {\n    msg.payload = {\n        status: 'ok',\n        message: 'En attente des premieres donnees...',\n        pompes: {\n            pompe_1: { T_moteur: null, T_ambiante: T_ambiante, delta_T: null, health_score: null, pente: null, rul_minutes: null, humidite: humidite },\n            pompe_2: { T_moteur: null, T_ambiante: T_ambiante, delta_T: null, health_score: null, pente: null, rul_minutes: null, humidite: humidite },\n            pompe_3: { T_moteur: null, T_ambiante: T_ambiante, delta_T: null, health_score: null, pente: null, rul_minutes: null, humidite: humidite },\n            pompe_4: { T_moteur: null, T_ambiante: T_ambiante, delta_T: null, health_score: null, pente: null, rul_minutes: null, humidite: humidite },\n            pompe_5: { T_moteur: null, T_ambiante: T_ambiante, delta_T: null, health_score: null, pente: null, rul_minutes: null, humidite: humidite }\n        },\n        timestamp: new Date().toISOString()\n    };\n    msg.headers = { 'Access-Control-Allow-Origin': '*' };\n    return msg;\n}\n\nmsg.payload = {\n    status: 'ok',\n    pompes: pompesData,\n    T_ambiante: T_ambiante,\n    humidite: humidite,\n    timestamp: new Date().toISOString()\n};\nmsg.headers = { 'Access-Control-Allow-Origin': '*' };\nreturn msg;",
+        "outputs": 1,
+        "x": 410,
+        "y": 380,
+        "wires": [
+            ["http_response_pt100"]
+        ]
+    },
+
+    {
+        "id": "http_response_pt100",
+        "type": "http response",
+        "z": "tab_principal",
+        "name": "Reponse /api/pt100",
+        "statusCode": "200",
+        "headers": {},
+        "x": 650,
+        "y": 380,
+        "wires": []
+    },
+
+    {
+        "id": "http_api_ml",
+        "type": "http in",
+        "z": "tab_principal",
+        "name": "GET /api/ml/predictions",
+        "url": "/api/ml/predictions",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 170,
+        "y": 460,
+        "wires": [
+            ["construire_reponse_ml"]
+        ]
+    },
+
+    {
+        "id": "construire_reponse_ml",
+        "type": "function",
+        "z": "tab_principal",
+        "name": "Construire reponse ML",
+        "func": "var predictions = flow.get('ml_predictions') || {};\nvar mlActive = Object.keys(predictions).length > 0;\n\nvar result = {\n    ml_active: mlActive,\n    predictions: {}\n};\n\nfor (var i = 1; i <= 5; i++) {\n    var key = 'pompe_' + i;\n    var pred = predictions[i] || predictions[key] || null;\n    \n    if (pred) {\n        result.predictions[key] = {\n            score_anomalie: pred.isolation_forest ? pred.isolation_forest.score_anomalie : 0,\n            est_anomalie: pred.isolation_forest ? pred.isolation_forest.est_anomalie : false,\n            delta_t_predit: pred.lstm ? pred.lstm.delta_t_predit : null,\n            health_predit: pred.lstm ? pred.lstm.health_predit : null,\n            rul_predit: pred.lstm ? pred.lstm.rul_minutes : -1,\n            tendance: pred.lstm ? pred.lstm.tendance : 0,\n            niveau_ml: pred.niveau_ml || 'NORMAL',\n            confiance: pred.confiance || 0\n        };\n    } else {\n        result.predictions[key] = {\n            score_anomalie: 0,\n            est_anomalie: false,\n            delta_t_predit: null,\n            health_predit: null,\n            rul_predit: -1,\n            tendance: 0,\n            niveau_ml: 'NORMAL',\n            confiance: 0\n        };\n    }\n}\n\nmsg.payload = result;\nmsg.headers = { 'Access-Control-Allow-Origin': '*' };\nreturn msg;",
+        "outputs": 1,
+        "x": 430,
+        "y": 460,
+        "wires": [
+            ["http_response_ml"]
+        ]
+    },
+
+    {
+        "id": "http_response_ml",
+        "type": "http response",
+        "z": "tab_principal",
+        "name": "Reponse /api/ml/predictions",
+        "statusCode": "200",
+        "headers": {},
+        "x": 680,
+        "y": 460,
+        "wires": []
+    },
+
+    {
+        "id": "comment_cors",
+        "type": "comment",
+        "z": "tab_principal",
+        "name": "=== CORS (OPTIONS) ===",
+        "x": 150,
+        "y": 540,
+        "wires": []
+    },
+
+    {
+        "id": "http_options_pt100",
+        "type": "http in",
+        "z": "tab_principal",
+        "name": "OPTIONS /api/pt100",
+        "url": "/api/pt100",
+        "method": "options",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 160,
+        "y": 600,
+        "wires": [
+            ["cors_response"]
+        ]
+    },
+
+    {
+        "id": "http_options_ml",
+        "type": "http in",
+        "z": "tab_principal",
+        "name": "OPTIONS /api/ml/predictions",
+        "url": "/api/ml/predictions",
+        "method": "options",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 180,
+        "y": 660,
+        "wires": [
+            ["cors_response"]
+        ]
+    },
+
+    {
+        "id": "cors_response",
+        "type": "function",
+        "z": "tab_principal",
+        "name": "CORS Headers",
+        "func": "msg.headers = {\n    'Access-Control-Allow-Origin': '*',\n    'Access-Control-Allow-Methods': 'GET, OPTIONS',\n    'Access-Control-Allow-Headers': 'Content-Type'\n};\nmsg.payload = '';\nmsg.statusCode = 204;\nreturn msg;",
+        "outputs": 1,
+        "x": 420,
+        "y": 630,
+        "wires": [
+            ["http_response_cors"]
+        ]
+    },
+
+    {
+        "id": "http_response_cors",
+        "type": "http response",
+        "z": "tab_principal",
+        "name": "Reponse CORS",
+        "statusCode": "",
+        "headers": {},
+        "x": 640,
+        "y": 630,
+        "wires": []
+    }
+]
