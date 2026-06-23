@@ -49,7 +49,7 @@ PT100 Sensors → ESP32 → MQTT → Raspberry Pi 4B → Dashboard
 │   ├── app.js                   # Dashboard logic
 │   ├── style.css                # Styling
 │   └── logo-onee.png            # Logo
-└── kicad_projet/                # PCB schematic (KiCad 8)
+ 
 ```
 
 ## Key Equations
@@ -96,7 +96,6 @@ Open browser: `http://<raspberry-pi-ip>:1880/dashboard`
 - **Backend**: Node-RED, Python 3, scikit-learn
 - **Database**: InfluxDB 2.x
 - **Frontend**: HTML5, CSS3, JavaScript, Chart.js
-- **PCB Design**: KiCad 8
 
 ## Author
 
