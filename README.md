@@ -100,4 +100,4 @@ Open browser: `http://<raspberry-pi-ip>:1880/dashboard`
 
 ## Author
 
-PFE Project - ONEE Ait Baha - 2024/2025
+PFE Project - ONEE Ait Baha - 2025/2026
